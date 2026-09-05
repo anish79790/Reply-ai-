@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">ReplyAI</string>
+    <string name="accessibility_service_label">ReplyAI - On-Device Chat Assistant</string>
+    <string name="accessibility_service_description">Reads currently visible chat messages in messaging apps to generate natural on-device AI reply suggestions without any cloud or API key.</string>
+</resources>

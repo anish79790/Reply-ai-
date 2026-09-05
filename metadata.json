@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix InstaReply AI",
+  "description": "Floating AI assistant that analyzes recent Instagram messages to suggest smart, context-aware replies in real-time.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
