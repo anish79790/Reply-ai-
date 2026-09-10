@@ -19,14 +19,10 @@ class AppSettingsRepository private constructor(context: Context) {
         val selectedTone = prefs.getString("selected_tone", "Auto") ?: "Auto"
         val promptStrategy = prefs.getString("prompt_strategy", "gemini") ?: "gemini"
         val customPrompt = prefs.getString("custom_prompt", "") ?: ""
-        val groqApiKey = prefs.getString("groq_api_key", "") ?: ""
         val defaultApps = AppSettings().enabledApps
         val savedApps = prefs.getStringSet("enabled_apps", defaultApps) ?: defaultApps
         val modelId = prefs.getString("selected_model_id", "qwen_1.7b_int4") ?: "qwen_1.7b_int4"
-        val engine = prefs.getString("ai_engine", "gemini") ?: "gemini"
-        val defaultKey = com.example.BuildConfig.GEMINI_API_KEY
-        val savedKey = prefs.getString("gemini_api_key", null)
-        val apiKey = if (savedKey.isNullOrBlank()) defaultKey else savedKey
+        val engine = AppSettings.normalizeEngine(prefs.getString("ai_engine", null))
         val persona = prefs.getString("custom_persona", "") ?: ""
         val offset = prefs.getInt("bubble_offset_dp", 88)
         val unloadMins = prefs.getInt("auto_unload_mins", 3)
@@ -53,11 +49,9 @@ class AppSettingsRepository private constructor(context: Context) {
             selectedTone = selectedTone,
             promptStrategy = promptStrategy,
             customPrompt = customPrompt,
-            groqApiKey = groqApiKey,
             enabledApps = savedApps,
             selectedModelId = modelId,
             aiEngine = engine,
-            geminiApiKey = apiKey,
             customPersona = persona,
             bubbleVerticalOffsetDp = offset,
             autoUnloadMinutes = unloadMins,
@@ -102,12 +96,6 @@ class AppSettingsRepository private constructor(context: Context) {
     fun setCustomPrompt(prompt: String) {
         prefs.edit().putString("custom_prompt", prompt).apply()
         _settings.value = _settings.value.copy(customPrompt = prompt)
-    }
-
-    fun setGroqApiKey(apiKey: String) {
-        val trimmed = apiKey.trim()
-        prefs.edit().putString("groq_api_key", trimmed).apply()
-        _settings.value = _settings.value.copy(groqApiKey = trimmed)
     }
 
     fun setBusinessContext(name: String, description: String) {
@@ -197,14 +185,9 @@ class AppSettingsRepository private constructor(context: Context) {
     }
 
     fun setAiEngine(engine: String) {
-        prefs.edit().putString("ai_engine", engine).apply()
-        _settings.value = _settings.value.copy(aiEngine = engine)
-    }
-
-    fun setGeminiApiKey(apiKey: String) {
-        val trimmed = apiKey.trim()
-        prefs.edit().putString("gemini_api_key", trimmed).apply()
-        _settings.value = _settings.value.copy(geminiApiKey = trimmed)
+        val normalized = AppSettings.normalizeEngine(engine)
+        prefs.edit().putString("ai_engine", normalized).apply()
+        _settings.value = _settings.value.copy(aiEngine = normalized)
     }
 
     fun setCustomPersona(persona: String) {

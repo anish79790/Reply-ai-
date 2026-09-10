@@ -84,6 +84,9 @@ import com.example.reply.ReplyStyle
 import com.example.reply.LocalReplyGenerator
 import com.example.llm.QuantizedLocalLLMEngine
 import com.example.ui.components.LocalLlmDiagnosticCard
+import com.example.ai.AiProviderRegistry
+import com.example.ai.ProviderId
+import com.example.settings.AppSettings
 import com.example.settings.AppSettingsRepository
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCard
@@ -102,10 +105,12 @@ import kotlinx.coroutines.launch
 @Composable
 fun HomeScreen(
     repository: AppSettingsRepository,
+    registry: AiProviderRegistry,
     downloadManager: ModelDownloadManager,
     capabilityManager: DeviceCapabilityManager,
     replyGenerator: ReplyGenerator,
-    onNavigateToModelSetup: () -> Unit
+    onNavigateToModelSetup: () -> Unit,
+    onNavigateToSettings: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -123,7 +128,6 @@ fun HomeScreen(
     val isModelInstalled = remember(downloadState) {
         downloadManager.isModelInstalled(capabilityManager.recommendedModel)
     }
-    val effectiveGeminiKey = settings.geminiApiKey.ifBlank { com.example.BuildConfig.GEMINI_API_KEY }
 
     Column(
         modifier = Modifier
@@ -155,9 +159,14 @@ fun HomeScreen(
             }
 
             // Quick Status Pill
-            val isAiReady = (settings.aiEngine == "gemini" && effectiveGeminiKey.isNotBlank()) ||
-                            (settings.aiEngine == "groq" && settings.groqApiKey.isNotBlank()) ||
-                            (settings.aiEngine == "local" && isModelInstalled)
+            val configuredProviders by registry.keys.configured.collectAsState()
+            val smartAiReady = configuredProviders.contains(ProviderId.GROQ) ||
+                configuredProviders.contains(ProviderId.XKIRO)
+            val isAiReady = when (settings.aiEngine) {
+                AppSettings.ENGINE_GEMINI -> configuredProviders.contains(ProviderId.GEMINI)
+                AppSettings.ENGINE_SMART -> smartAiReady
+                else -> isModelInstalled
+            }
             val allReady = isAccessibilityActive && hasOverlayPermission && isAiReady && settings.isAssistantEnabled
             Box(
                 modifier = Modifier
@@ -258,7 +267,11 @@ fun HomeScreen(
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
                         Text(
-                            text = if (settings.aiEngine == "gemini") "Gemini Active" else if (settings.aiEngine == "groq") "Groq Active" else "Local Active",
+                            text = when (settings.aiEngine) {
+                                AppSettings.ENGINE_GEMINI -> "Gemini Active"
+                                AppSettings.ENGINE_SMART -> "Smart AI Active"
+                                else -> "Local AI Active"
+                            },
                             color = ReplyAIAccent,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
@@ -275,218 +288,67 @@ fun HomeScreen(
                 )
 
                 Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(10.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Button(
-                        onClick = { repository.setAiEngine("gemini") },
+                    EngineButton(
+                        label = "✨ Gemini",
+                        selected = settings.aiEngine == AppSettings.ENGINE_GEMINI,
                         modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (settings.aiEngine == "gemini") ReplyAIPurple else DarkSurface
-                        ),
-                        shape = RoundedCornerShape(10.dp)
-                    ) {
-                        Text(
-                            text = "✨ Gemini",
-                            fontSize = 11.sp,
-                            fontWeight = if (settings.aiEngine == "gemini") FontWeight.Bold else FontWeight.Normal
-                        )
-                    }
-                    Button(
-                        onClick = { repository.setAiEngine("groq") },
+                        onClick = { repository.setAiEngine(AppSettings.ENGINE_GEMINI) }
+                    )
+                    EngineButton(
+                        label = "🧠 Smart AI",
+                        selected = settings.aiEngine == AppSettings.ENGINE_SMART,
                         modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (settings.aiEngine == "groq") ReplyAIPurple else DarkSurface
-                        ),
-                        shape = RoundedCornerShape(10.dp)
-                    ) {
-                        Text(
-                            text = "🚀 Groq",
-                            fontSize = 11.sp,
-                            fontWeight = if (settings.aiEngine == "groq") FontWeight.Bold else FontWeight.Normal
-                        )
-                    }
-                    Button(
-                        onClick = { repository.setAiEngine("local") },
+                        onClick = { repository.setAiEngine(AppSettings.ENGINE_SMART) }
+                    )
+                    EngineButton(
+                        label = "⚡ Local AI",
+                        selected = settings.aiEngine == AppSettings.ENGINE_LOCAL,
                         modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (settings.aiEngine == "local") ReplyAIPurple else DarkSurface
-                        ),
-                        shape = RoundedCornerShape(10.dp)
-                    ) {
-                        Text(
-                            text = "⚡ Local",
-                            fontSize = 11.sp,
-                            fontWeight = if (settings.aiEngine == "local") FontWeight.Bold else FontWeight.Normal
-                        )
-                    }
+                        onClick = { repository.setAiEngine(AppSettings.ENGINE_LOCAL) }
+                    )
                 }
 
-                if (settings.aiEngine == "gemini") {
-                    Spacer(modifier = Modifier.height(10.dp))
-                    var quickApiKey by remember(settings.geminiApiKey) { mutableStateOf(settings.geminiApiKey) }
-                    var geminiTestStatus by remember { mutableStateOf<String?>(null) }
-                    var isTestingGemini by remember { mutableStateOf(false) }
+                Spacer(modifier = Modifier.height(10.dp))
+                val engineNeedsSetup =
+                    (settings.aiEngine == AppSettings.ENGINE_GEMINI && !configuredProviders.contains(ProviderId.GEMINI)) ||
+                        (settings.aiEngine == AppSettings.ENGINE_SMART && !smartAiReady)
+                Text(
+                    text = when (settings.aiEngine) {
+                        AppSettings.ENGINE_GEMINI ->
+                            if (configuredProviders.contains(ProviderId.GEMINI))
+                                "Gemini calls Google Gemini directly with your saved key. No routing through Smart AI."
+                            else
+                                "Gemini needs an API key. Add it in Settings → AI Providers."
 
-                    OutlinedTextField(
-                        value = quickApiKey,
-                        onValueChange = {
-                            quickApiKey = it
-                            repository.setGeminiApiKey(it)
-                            geminiTestStatus = null
-                        },
-                        placeholder = { Text(if (effectiveGeminiKey.isNotBlank()) "Built-in Gemini Key Active (or paste custom)" else "Paste Gemini API Key...", color = TextTertiary, fontSize = 12.sp) },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary,
-                            focusedBorderColor = ReplyAIPurple,
-                            unfocusedBorderColor = Color(0xFF35344A),
-                            focusedContainerColor = DarkBackground,
-                            unfocusedContainerColor = DarkBackground
-                        ),
-                        shape = RoundedCornerShape(10.dp)
-                    )
+                        AppSettings.ENGINE_SMART ->
+                            if (smartAiReady)
+                                "Smart AI ranks Groq and xKiro for every request and fails over automatically."
+                            else
+                                "Smart AI needs at least one of Groq or xKiro configured. Add a key in Settings → AI Providers."
 
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = if (effectiveGeminiKey.isNotBlank()) "✓ Built-in Key Active" else "Key required",
-                            color = if (effectiveGeminiKey.isNotBlank()) SuccessGreen else WarningAmber,
-                            fontSize = 11.sp
-                        )
-                        Button(
-                            onClick = {
-                                isTestingGemini = true
-                                geminiTestStatus = "Testing connection..."
-                                scope.launch {
-                                    val client = com.example.gemini.GeminiClient()
-                                    val keyToTest = if (quickApiKey.isNotBlank()) quickApiKey else com.example.BuildConfig.GEMINI_API_KEY
-                                    val res = client.testApiKey(keyToTest)
-                                    isTestingGemini = false
-                                    geminiTestStatus = if (res.isSuccess) "✓ Connected (Gemini 3.8 Flash Ready!)" else "✕ ${res.exceptionOrNull()?.localizedMessage ?: "Failed"}"
-                                }
-                            },
-                            enabled = !isTestingGemini && effectiveGeminiKey.isNotBlank(),
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E2A4A))
-                        ) {
-                            Text(
-                                text = if (isTestingGemini) "Testing..." else "⚡ Test Gemini",
-                                fontSize = 11.sp,
-                                color = TextPrimary
-                            )
-                        }
-                    }
+                        else ->
+                            "Local AI runs fully on-device with your GGUF model. It never calls a cloud provider."
+                    },
+                    color = if (engineNeedsSetup) WarningAmber else Color(0xFFC4B5FD),
+                    fontSize = 11.5.sp,
+                    lineHeight = 16.sp
+                )
 
-                    if (geminiTestStatus != null) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = geminiTestStatus!!,
-                            color = if (geminiTestStatus!!.startsWith("✓")) SuccessGreen else Color(0xFFFF5252),
-                            fontSize = 11.5.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-                } else if (settings.aiEngine == "groq") {
-                    Spacer(modifier = Modifier.height(10.dp))
-                    var groqKey by remember(settings.groqApiKey) { mutableStateOf(settings.groqApiKey) }
-                    var groqTestStatus by remember { mutableStateOf<String?>(null) }
-                    var isTestingGroq by remember { mutableStateOf(false) }
-
-                    OutlinedTextField(
-                        value = groqKey,
-                        onValueChange = {
-                            groqKey = it
-                            repository.setGroqApiKey(it)
-                            groqTestStatus = null
-                        },
-                        placeholder = { Text("Paste Groq API Key (starts with gsk_...)", color = TextTertiary, fontSize = 12.sp) },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary,
-                            focusedBorderColor = ReplyAIPurple,
-                            unfocusedBorderColor = Color(0xFF35344A),
-                            focusedContainerColor = DarkBackground,
-                            unfocusedContainerColor = DarkBackground
-                        ),
-                        shape = RoundedCornerShape(10.dp)
-                    )
-
-                    Spacer(modifier = Modifier.height(6.dp))
-                    val keyTrimmed = groqKey.trim()
-                    val keyLen = keyTrimmed.length
-                    val isKeyIncomplete = keyLen in 1..44
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = if (keyTrimmed.isBlank()) "Free key from console.groq.com" else "$keyLen/56 chars" + if (isKeyIncomplete) " ⚠️ Incomplete" else " ✓",
-                            color = if (isKeyIncomplete) WarningAmber else if (keyLen >= 45) SuccessGreen else TextSecondary,
-                            fontSize = 11.sp
-                        )
-                        Button(
-                            onClick = {
-                                isTestingGroq = true
-                                groqTestStatus = "Testing Groq connection..."
-                                scope.launch {
-                                    val client = com.example.groq.GroqClient()
-                                    val res = client.testApiKey(keyTrimmed)
-                                    isTestingGroq = false
-                                    groqTestStatus = if (res.isSuccess) "✓ Connected (Groq LLaMA 3.1 Ready!)" else "✕ ${res.exceptionOrNull()?.localizedMessage ?: "Failed"}"
-                                }
-                            },
-                            enabled = !isTestingGroq && keyTrimmed.isNotBlank(),
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E2A4A))
-                        ) {
-                            Text(
-                                text = if (isTestingGroq) "Testing..." else "⚡ Test Groq",
-                                fontSize = 11.sp,
-                                color = TextPrimary
-                            )
-                        }
-                    }
-
-                    if (isKeyIncomplete) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "⚠️ Groq API key is truncated ($keyLen chars). Full Groq key is ~56 characters. Please re-copy the entire key from console.groq.com/keys.",
-                            color = WarningAmber,
-                            fontSize = 11.sp,
-                            lineHeight = 15.sp
-                        )
-                    }
-
-                    if (groqTestStatus != null) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = groqTestStatus!!,
-                            color = if (groqTestStatus!!.startsWith("✓")) SuccessGreen else Color(0xFFFF5252),
-                            fontSize = 11.5.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-                } else if (settings.aiEngine == "local") {
+                if (engineNeedsSetup) {
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "ℹ️ Offline GGUF requires 64-bit llama.cpp native binaries. For instant real AI replies without downloading 1.1GB, use Gemini (Built-in Free) or Groq!",
-                        color = Color(0xFFC4B5FD),
-                        fontSize = 11.5.sp,
-                        lineHeight = 16.sp
-                    )
+                    Button(
+                        onClick = onNavigateToSettings,
+                        colors = ButtonDefaults.buttonColors(containerColor = ReplyAIPurple),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                    ) {
+                        Text("Configure AI providers", fontSize = 11.5.sp, color = Color.White)
+                    }
                 }
             }
         }
@@ -511,20 +373,26 @@ fun HomeScreen(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     val (statusIcon, statusColor, statusLabel, statusSubtitle) = when {
-                        settings.aiEngine == "gemini" && effectiveGeminiKey.isNotBlank() ->
-                            listOf(Icons.Default.AutoAwesome, ReplyAIAccent, "AI: Gemini 3.8 Flash", "Google Gemini AI Active • Zero storage required")
-                        settings.aiEngine == "groq" && settings.groqApiKey.isNotBlank() ->
-                            listOf(Icons.Default.AutoAwesome, ReplyAIAccent, "AI: Groq (Llama 3.1)", "Ultra-Fast Cloud Llama 3.1 Active")
-                        settings.aiEngine == "gemini" ->
-                            listOf(Icons.Default.AutoAwesome, WarningAmber, "AI: Gemini (Key Missing)", "Tap to enter free Gemini API key")
-                        settings.aiEngine == "groq" ->
-                            listOf(Icons.Default.AutoAwesome, WarningAmber, "AI: Groq (Key Missing)", "Tap to enter free Groq API key")
+                        settings.aiEngine == AppSettings.ENGINE_GEMINI && configuredProviders.contains(ProviderId.GEMINI) ->
+                            listOf(Icons.Default.AutoAwesome, ReplyAIAccent, "AI: Gemini", "Calls Google Gemini directly • Zero storage required")
+
+                        settings.aiEngine == AppSettings.ENGINE_GEMINI ->
+                            listOf(Icons.Default.AutoAwesome, WarningAmber, "AI: Gemini (Key Missing)", "Add a Gemini key in Settings → AI Providers")
+
+                        settings.aiEngine == AppSettings.ENGINE_SMART && smartAiReady ->
+                            listOf(Icons.Default.AutoAwesome, ReplyAIAccent, "AI: Smart AI", "Routes between Groq and xKiro automatically")
+
+                        settings.aiEngine == AppSettings.ENGINE_SMART ->
+                            listOf(Icons.Default.AutoAwesome, WarningAmber, "AI: Smart AI (No Provider)", "Configure Groq or xKiro in Settings → AI Providers")
+
                         downloadState is ModelState.Downloading ->
                             listOf(Icons.Default.Download, ReplyAIAccent, "AI Model: Downloading", "Setting up local weights...")
+
                         isModelInstalled ->
                             listOf(Icons.Default.CheckCircle, SuccessGreen, "AI Model: Ready (Offline)", "${capabilityManager.recommendedModel.name} • 100% On-Device")
+
                         else ->
-                            listOf(Icons.Default.Refresh, WarningAmber, "AI: Ready", "Local contextual engine ready or switch to Gemini/Groq")
+                            listOf(Icons.Default.Refresh, WarningAmber, "AI Model: Not installed", "Local AI needs a GGUF model on the AI Model tab")
                     }
 
                     Box(
@@ -562,6 +430,12 @@ fun HomeScreen(
                 )
             }
         }
+
+        if (settings.aiEngine == AppSettings.ENGINE_SMART) {
+            Spacer(modifier = Modifier.height(16.dp))
+            SmartAiDiagnosticsCard(registry = registry)
+        }
+
 
         // Local LLM Diagnostics (if Local Engine is selected)
         if (settings.aiEngine == "local") {
@@ -701,7 +575,8 @@ fun HomeScreen(
         InteractiveTesterCard(
             replyGenerator = replyGenerator,
             customPersona = settings.customPersona,
-            repository = repository
+            repository = repository,
+            registry = registry
         )
 
         Spacer(modifier = Modifier.height(24.dp))
@@ -824,13 +699,22 @@ private fun PermissionItem(
 private fun InteractiveTesterCard(
     replyGenerator: ReplyGenerator,
     customPersona: String,
-    repository: AppSettingsRepository
+    repository: AppSettingsRepository,
+    registry: AiProviderRegistry
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     val settings by repository.settings.collectAsState()
-    val effectiveKey = settings.geminiApiKey.ifBlank { com.example.BuildConfig.GEMINI_API_KEY }
+
+    val configuredProviders by registry.keys.configured.collectAsState()
+    val engineReady = when (settings.aiEngine) {
+        AppSettings.ENGINE_GEMINI -> configuredProviders.contains(ProviderId.GEMINI)
+        AppSettings.ENGINE_SMART ->
+            configuredProviders.contains(ProviderId.GROQ) || configuredProviders.contains(ProviderId.XKIRO)
+        else -> true
+    }
+
 
     var simulatedMessage by remember { mutableStateOf("Bhai kal free ho kya? Movie chalte hain!") }
     var isGenerating by remember { mutableStateOf(false) }
@@ -853,77 +737,44 @@ private fun InteractiveTesterCard(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Engine Selection Switcher
+            // Engine Selection Switcher (exactly three user-facing engines)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(if (settings.aiEngine == "gemini") ReplyAIPurple else DarkBackground)
-                        .border(1.dp, if (settings.aiEngine == "gemini") ReplyAIAccent else Color(0xFF35344A), RoundedCornerShape(10.dp))
-                        .clickable {
-                            repository.setAiEngine("gemini")
-                            generationResult = null
-                            errorMessage = null
-                        }
-                        .padding(vertical = 8.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "✨ Gemini 3.8",
-                        color = if (settings.aiEngine == "gemini") Color.White else TextSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(if (settings.aiEngine == "groq") ReplyAIPurple else DarkBackground)
-                        .border(1.dp, if (settings.aiEngine == "groq") ReplyAIAccent else Color(0xFF35344A), RoundedCornerShape(10.dp))
-                        .clickable {
-                            repository.setAiEngine("groq")
-                            generationResult = null
-                            errorMessage = null
-                        }
-                        .padding(vertical = 8.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "⚡ Groq LLaMA",
-                        color = if (settings.aiEngine == "groq") Color.White else TextSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(if (settings.aiEngine == "local") ReplyAIPurple else DarkBackground)
-                        .border(1.dp, if (settings.aiEngine == "local") ReplyAIAccent else Color(0xFF35344A), RoundedCornerShape(10.dp))
-                        .clickable {
-                            repository.setAiEngine("local")
-                            generationResult = null
-                            errorMessage = null
-                        }
-                        .padding(vertical = 8.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "📱 Local GGUF",
-                        color = if (settings.aiEngine == "local") Color.White else TextSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+                TesterEngineChip(
+                    label = "✨ Gemini",
+                    selected = settings.aiEngine == AppSettings.ENGINE_GEMINI,
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        repository.setAiEngine(AppSettings.ENGINE_GEMINI)
+                        generationResult = null
+                        errorMessage = null
+                    }
+                )
+                TesterEngineChip(
+                    label = "🧠 Smart AI",
+                    selected = settings.aiEngine == AppSettings.ENGINE_SMART,
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        repository.setAiEngine(AppSettings.ENGINE_SMART)
+                        generationResult = null
+                        errorMessage = null
+                    }
+                )
+                TesterEngineChip(
+                    label = "📱 Local AI",
+                    selected = settings.aiEngine == AppSettings.ENGINE_LOCAL,
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        repository.setAiEngine(AppSettings.ENGINE_LOCAL)
+                        generationResult = null
+                        errorMessage = null
+                    }
+                )
             }
 
-            if (settings.aiEngine == "local") {
+            if (settings.aiEngine == AppSettings.ENGINE_LOCAL) {
                 Spacer(modifier = Modifier.height(10.dp))
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF251D38)),
@@ -932,26 +783,14 @@ private fun InteractiveTesterCard(
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text(
-                            text = "ℹ️ Offline GGUF requires ~1.1 GB downloaded model weights and native C++ JNI (libllama.so). To get real, 100% genuine AI replies immediately with zero download, switch to Gemini 3.8 Flash (Free) or Groq LLaMA.",
+                            text = "ℹ️ Local AI requires ~1.1 GB downloaded model weights and native C++ JNI (libllama.so). It runs fully on-device and never calls a cloud provider.",
                             color = Color(0xFFDDD6FE),
                             fontSize = 11.5.sp,
                             lineHeight = 16.sp
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Button(
-                            onClick = { repository.setAiEngine("gemini") },
-                            colors = ButtonDefaults.buttonColors(containerColor = ReplyAIPurple),
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                        ) {
-                            Text("Switch to Gemini 3.8 Flash (Free & Active)", fontSize = 11.5.sp)
-                        }
                     }
                 }
             }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
             Text(
                 text = "Incoming Message to Test:",
                 color = TextSecondary,
@@ -998,10 +837,24 @@ private fun InteractiveTesterCard(
 
             Spacer(modifier = Modifier.height(14.dp))
 
+            if (!engineReady) {
+                Text(
+                    text = when (settings.aiEngine) {
+                        AppSettings.ENGINE_GEMINI -> "Add a Gemini key in Settings → AI Providers to test."
+                        else -> "Configure Groq or xKiro in Settings → AI Providers to test Smart AI."
+                    },
+                    color = WarningAmber,
+                    fontSize = 11.5.sp,
+                    lineHeight = 15.sp
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+            }
+
+
             val buttonLabel = when (settings.aiEngine) {
-                "groq" -> "Generate with Groq LLaMA ⚡"
-                "local" -> "Generate with Local Model 📱"
-                else -> "Generate with Gemini 3.8 Flash ✨"
+                AppSettings.ENGINE_SMART -> "Generate with Smart AI 🧠"
+                AppSettings.ENGINE_LOCAL -> "Generate with Local AI 📱"
+                else -> "Generate with Gemini ✨"
             }
 
             Button(
@@ -1038,7 +891,7 @@ private fun InteractiveTesterCard(
                     .height(48.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = ReplyAIPurple),
                 shape = RoundedCornerShape(12.dp),
-                enabled = !isGenerating && simulatedMessage.isNotBlank()
+            enabled = !isGenerating && simulatedMessage.isNotBlank() && engineReady
             ) {
                 if (isGenerating) {
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
@@ -1186,3 +1039,129 @@ private fun HowToStep(stepNumber: String, title: String, description: String) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Engine selection + Smart AI diagnostics
+// ---------------------------------------------------------------------------------------------
+
+/** Selector for one of the three user-facing engines. */
+@Composable
+private fun EngineButton(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Button(
+        onClick = onClick,
+        modifier = modifier,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (selected) ReplyAIPurple else DarkSurface
+        ),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+        )
+    }
+}
+
+@Composable
+private fun TesterEngineChip(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) ReplyAIPurple else DarkBackground)
+            .border(
+                1.dp,
+                if (selected) ReplyAIAccent else Color(0xFF35344A),
+                RoundedCornerShape(10.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            color = if (selected) Color.White else TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+/**
+ * Log-safe Smart AI diagnostics.
+ *
+ * Shows only provider configuration booleans and the router's last decision. API keys,
+ * Authorization headers and conversation content are never rendered here.
+ */
+@Composable
+private fun SmartAiDiagnosticsCard(registry: AiProviderRegistry) {
+    val configured by registry.keys.configured.collectAsState()
+    val lastRun by registry.smartRouter.lastRun.collectAsState()
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        shape = RoundedCornerShape(18.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF2A283D))
+    ) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Text(
+                text = "Smart AI Diagnostics",
+                color = TextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+
+            DiagnosticLine("Groq configured", yesNo(configured.contains(ProviderId.GROQ)))
+            DiagnosticLine("xKiro configured", yesNo(configured.contains(ProviderId.XKIRO)))
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            if (lastRun == null) {
+                Text(
+                    text = "No Smart AI request has been made yet.",
+                    color = TextTertiary,
+                    fontSize = 12.sp
+                )
+            } else {
+                val run = lastRun!!
+                DiagnosticLine("Last provider", run.provider?.displayName ?: "—")
+                DiagnosticLine("Last model", run.model ?: "—")
+                DiagnosticLine("Last latency", run.latencyMs?.let { "$it ms" } ?: "—")
+                DiagnosticLine("Last result", run.result + run.errorCategory?.let { " ($it)" }.orEmpty())
+                DiagnosticLine("Attempts", "${run.attempts} (of ${run.candidateCount} candidates)")
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticLine(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(text = label, color = TextSecondary, fontSize = 12.sp)
+        Text(
+            text = value,
+            color = TextPrimary,
+            fontSize = 12.sp,
+            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+        )
+    }
+}
+
+private fun yesNo(value: Boolean): String = if (value) "yes" else "no"

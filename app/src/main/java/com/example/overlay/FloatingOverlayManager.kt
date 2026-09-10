@@ -27,6 +27,7 @@ import android.widget.TextView
 import android.widget.Toast
 import com.example.MainActivity
 import com.example.accessibility.AccessibilityConversationExtractor
+import com.example.ai.AiProviderRegistry
 import com.example.accessibility.ComposerState
 import com.example.accessibility.ConversationExtractor
 import com.example.conversation.ExtractedConversation
@@ -61,7 +62,8 @@ class FloatingOverlayManager(
     private val context: Context,
     private val conversationExtractor: ConversationExtractor = AccessibilityConversationExtractor(),
     private val onOcrFallbackRequested: (() -> Unit)? = null,
-    private val onClearContextRequested: (() -> Unit)? = null
+    private val onClearContextRequested: (() -> Unit)? = null,
+    private val registry: AiProviderRegistry? = null
 ) {
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -77,7 +79,8 @@ class FloatingOverlayManager(
         promptBuilder = promptBuilder,
         llmEngine = llmEngine,
         capabilityManager = capabilityManager,
-        appSettingsRepository = repository
+        appSettingsRepository = repository,
+        registry = registry ?: AiProviderRegistry.getInstance(context)
     )
 
     // Suggestion Pill Bar (Anchored above keyboard)
@@ -1366,10 +1369,11 @@ class FloatingOverlayManager(
 
         // Engine indicator chip
         val engineBadge = TextView(context).apply {
+            // engineUsed carries the concrete model id, so map it back onto a user-facing engine.
             val engineClean = when {
-                engineUsed.contains("local", true) -> "⚡ Local"
-                engineUsed.contains("groq", true) -> "⚡ Groq"
-                else -> "✨ Gemini"
+                engineUsed.startsWith("local", true) -> "⚡ Local AI"
+                engineUsed.contains("gemini", true) -> "✨ Gemini"
+                else -> "🧠 Smart AI"
             }
             text = if (latencyMs > 0) "$engineClean • ${latencyMs}ms" else engineClean
             setTextColor(0xFFA78BFA.toInt())
