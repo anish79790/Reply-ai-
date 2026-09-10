@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.ai.AiProviderRegistry
 import com.example.llm.AndroidDeviceCapabilityManager
 import com.example.llm.ModelDownloadManager
 import com.example.llm.QuantizedLocalLLMEngine
@@ -64,12 +65,18 @@ fun MainAppContent(repository: AppSettingsRepository) {
     val downloadManager = remember { ModelDownloadManager(context, scope) }
     val llmEngine = remember { QuantizedLocalLLMEngine(context, capabilityManager, downloadManager, scope) }
     val promptBuilder = remember { ReplyPromptBuilder() }
+
+    // Provider registry: Gemini (direct), Smart AI (Groq/xKiro router) and Local AI.
+    val registry = remember { AiProviderRegistry.getInstance(context) }
+        .also { it.attachLocalEngine(llmEngine) }
+
     val replyGenerator = remember(repository) {
         LocalReplyGenerator(
             promptBuilder = promptBuilder,
             llmEngine = llmEngine,
             capabilityManager = capabilityManager,
-            appSettingsRepository = repository
+            appSettingsRepository = repository,
+            registry = registry
         )
     }
 
@@ -128,19 +135,28 @@ fun MainAppContent(repository: AppSettingsRepository) {
             when (currentTab) {
                 NavItem.Home -> HomeScreen(
                     repository = repository,
+                    registry = registry,
                     downloadManager = downloadManager,
                     capabilityManager = capabilityManager,
                     replyGenerator = replyGenerator,
-                    onNavigateToModelSetup = { currentTab = NavItem.Model }
+                    onNavigateToModelSetup = { currentTab = NavItem.Model },
+                    onNavigateToSettings = { currentTab = NavItem.Settings }
                 )
+
                 NavItem.Model -> ModelSetupScreen(
                     downloadManager = downloadManager,
                     capabilityManager = capabilityManager,
                     repository = repository,
+                    registry = registry,
                     replyGenerator = replyGenerator
                 )
+
                 NavItem.Apps -> AppsScreen(repository = repository)
-                NavItem.Settings -> SettingsScreen(repository = repository)
+                NavItem.Settings -> SettingsScreen(
+                    repository = repository,
+                    registry = registry
+                )
+
                 NavItem.Privacy -> PrivacyScreen()
             }
         }

@@ -1,127 +1,70 @@
 package com.example.reply
 
 import android.util.Log
-import com.example.conversation.DetectedLanguage
+import com.example.ai.AiError
+import com.example.ai.AiErrorCategory
+import com.example.ai.AiErrorException
+import com.example.ai.AiProviderRegistry
+import com.example.ai.AiTextRequest
+import com.example.ai.AiTextResult
+import com.example.ai.LocalAiProvider
+import com.example.ai.ProviderHealthStore
+import com.example.ai.ReplySuggestionParser
+import com.example.ai.TaskProfile
+import com.example.ai.TaskProfileAnalyzer
 import com.example.conversation.ExtractedConversation
-import com.example.gemini.GeminiClient
-import com.example.groq.GroqClient
 import com.example.llm.DeviceCapabilityManager
 import com.example.llm.LocalLLMEngine
 import com.example.prompt.PromptBuilder
+import com.example.settings.AppSettings
 import com.example.settings.AppSettingsRepository
 
+/**
+ * Single implementation of reply generation for all engines.
+ *
+ * Engine routing (exactly three user-facing engines):
+ *  - Gemini  -> [AiProviderRegistry.gemini] only. Never Smart AI, Groq, xKiro or local.
+ *  - Local AI-> [AiProviderRegistry.local] only. No cloud fallback of any kind.
+ *  - Smart AI-> [AiProviderRegistry.smartRouter], which internally routes between Groq and xKiro.
+ *
+ * Prompt building stays in [PromptBuilder] and reply parsing stays in [ReplySuggestionParser],
+ * so providers never duplicate either. Tone is carried entirely by the prompt and is never
+ * rewritten here.
+ */
 class LocalReplyGenerator(
     private val promptBuilder: PromptBuilder,
     val llmEngine: LocalLLMEngine,
     private val capabilityManager: DeviceCapabilityManager,
     private val appSettingsRepository: AppSettingsRepository? = null,
-    private val geminiClient: GeminiClient = GeminiClient(),
-    private val groqClient: GroqClient = GroqClient()
+    private val registry: AiProviderRegistry? = null
 ) : ReplyGenerator {
-
-    companion object {
-        private const val TAG = "LocalReplyGenerator"
-    }
 
     override suspend fun generateReplies(
         conversation: ExtractedConversation,
         customPersona: String?
     ): Result<ReplyGenerationResult> {
         if (conversation.isEmpty && conversation.draftText.isNullOrBlank()) {
-            Log.e(TAG, "Chat extraction failed or empty conversation")
-            return Result.failure(IllegalStateException("CHAT_EXTRACTION_ERROR: No conversation messages or draft text detected."))
-        }
-
-        val maxContext = capabilityManager.maxContextMessages
-        val settings = appSettingsRepository?.settings?.value
-        val businessContext = if (settings?.isBusinessContextEnabled == true && !settings.businessDescription.isNullOrBlank()) {
-            "Business/Owner: ${settings.businessName}\nKnowledge & Policies: ${settings.businessDescription}"
-        } else null
-
-        val tone = settings?.selectedTone ?: "Auto"
-        val strategy = settings?.promptStrategy ?: "gemini"
-        val customPromptText = settings?.customPrompt ?: ""
-
-        val prompt = promptBuilder.buildPrompt(conversation, maxContext, customPersona, businessContext, tone, strategy, customPromptText)
-
-        val effectiveApiKey = if (!settings?.geminiApiKey.isNullOrBlank()) {
-            settings!!.geminiApiKey
-        } else {
-            com.example.BuildConfig.GEMINI_API_KEY
-        }
-        val aiEngine = settings?.aiEngine ?: "gemini"
-
-        Log.d(TAG, "generateReplies started | Provider: $aiEngine | Tone: $tone | MessagesCount: ${conversation.messages.size}")
-
-        val startTime = System.currentTimeMillis()
-        val actualEngineUsed: String
-
-        val rawOutput = when (aiEngine) {
-            "groq" -> {
-                val groqKey = settings?.groqApiKey?.trim() ?: ""
-                if (groqKey.isBlank()) {
-                    return Result.failure(
-                        IllegalStateException("GROQ_ERROR: Groq API key is missing. Please enter your API key in Settings.")
+            return Result.failure(
+                AiErrorException(
+                    AiError(
+                        category = AiErrorCategory.InvalidRequest,
+                        safeMessage = "CHAT_EXTRACTION_ERROR: No conversation messages or draft text detected."
                     )
-                }
-                Log.d(TAG, "Calling Groq provider...")
-                val groqResult = groqClient.generateContent(groqKey, prompt)
-                if (groqResult.isSuccess) {
-                    actualEngineUsed = "Groq API (Llama)"
-                    groqResult.getOrThrow()
-                } else {
-                    val ex = groqResult.exceptionOrNull()
-                    Log.e(TAG, "Groq provider execution failed: ${ex?.message}")
-                    return Result.failure(ex ?: IllegalStateException("GROQ_ERROR: Unknown failure"))
-                }
-            }
-            "local" -> {
-                Log.d(TAG, "Calling Local LLM engine...")
-                val localResult = llmEngine.generate(prompt)
-                if (localResult.isSuccess) {
-                    actualEngineUsed = "Local LLM (GGUF)"
-                    localResult.getOrThrow()
-                } else {
-                    val ex = localResult.exceptionOrNull()
-                    Log.e(TAG, "Local LLM provider execution failed: ${ex?.message}")
-                    return Result.failure(ex ?: IllegalStateException("LOCAL_LLM_ERROR: Local inference failed"))
-                }
-            }
-            else -> { // "gemini"
-                if (effectiveApiKey.isBlank()) {
-                    return Result.failure(
-                        IllegalStateException("GEMINI_ERROR: Gemini API key is required. Open Settings to enter your key.")
-                    )
-                }
-                Log.d(TAG, "Calling Gemini provider...")
-                val geminiResult = geminiClient.generateContent(effectiveApiKey, prompt)
-                if (geminiResult.isSuccess) {
-                    actualEngineUsed = "Gemini API"
-                    geminiResult.getOrThrow()
-                } else {
-                    val ex = geminiResult.exceptionOrNull()
-                    Log.e(TAG, "Gemini provider execution failed: ${ex?.message}")
-                    return Result.failure(ex ?: IllegalStateException("GEMINI_ERROR: Unknown failure"))
-                }
-            }
-        }
-        val latencyMs = System.currentTimeMillis() - startTime
-
-        val parsedList = parseOutputToSuggestions(rawOutput, conversation.detectedLanguage)
-        if (parsedList.isEmpty()) {
-            return Result.failure(IllegalStateException("INVALID_MODEL_OUTPUT: Provider returned non-parsable or empty suggestions."))
-        }
-
-        appSettingsRepository?.decrementCredit()
-
-        return Result.success(
-            ReplyGenerationResult(
-                suggestions = parsedList,
-                promptUsed = prompt,
-                engineUsed = actualEngineUsed,
-                latencyMs = latencyMs
+                )
             )
+        }
+
+        val settings = appSettingsRepository?.settings?.value
+        val prompt = buildReplyPrompt(conversation, customPersona, settings)
+
+        val raw = generateRaw(
+            prompt = prompt,
+            conversation = conversation,
+            settings = settings,
+            systemPrompt = toneSystemInstruction(settings, customPersona)
         )
+
+        return raw.map { result -> finish(result, prompt) }
     }
 
     suspend fun executeAiCommand(
@@ -129,61 +72,31 @@ class LocalReplyGenerator(
         conversation: ExtractedConversation,
         customPersona: String?
     ): Result<String> {
+        val settings = appSettingsRepository?.settings?.value
+        val businessContext = businessContextOf(settings)
         val effectiveCommand = if (commandInstruction.isBlank()) {
             "Generate a natural, helpful reply to the latest message in this conversation."
         } else {
             commandInstruction.trim()
         }
 
-        val settings = appSettingsRepository?.settings?.value
-        val businessContext = if (settings?.isBusinessContextEnabled == true && !settings.businessDescription.isNullOrBlank()) {
-            "Business/Owner: ${settings.businessName}\nKnowledge & Policies: ${settings.businessDescription}"
-        } else null
+        val prompt = promptBuilder.buildAiCommandPrompt(
+            effectiveCommand,
+            conversation,
+            customPersona,
+            businessContext
+        )
 
-        val prompt = promptBuilder.buildAiCommandPrompt(effectiveCommand, conversation, customPersona, businessContext)
+        val raw = generateRaw(
+            prompt = prompt,
+            conversation = conversation,
+            settings = settings,
+            systemPrompt = toneSystemInstruction(settings, customPersona)
+        )
 
-        val effectiveApiKey = if (!settings?.geminiApiKey.isNullOrBlank()) {
-            settings!!.geminiApiKey
-        } else {
-            com.example.BuildConfig.GEMINI_API_KEY
-        }
-        val aiEngine = settings?.aiEngine ?: "gemini"
+        val result = raw.getOrNull() ?: return Result.failure(raw.exceptionOrNull()!!)
 
-        val rawOutput = when (aiEngine) {
-            "groq" -> {
-                val groqKey = settings?.groqApiKey?.trim() ?: ""
-                if (groqKey.isBlank()) {
-                    return Result.failure(IllegalStateException("GROQ_ERROR: Groq API key is missing. Add it in Settings."))
-                }
-                val groqResult = groqClient.generateContent(groqKey, prompt)
-                if (groqResult.isSuccess) {
-                    groqResult.getOrThrow()
-                } else {
-                    return Result.failure(groqResult.exceptionOrNull() ?: IllegalStateException("GROQ_ERROR: Command execution failed"))
-                }
-            }
-            "local" -> {
-                val localRes = llmEngine.generate(prompt)
-                if (localRes.isSuccess) {
-                    localRes.getOrThrow()
-                } else {
-                    return Result.failure(localRes.exceptionOrNull() ?: IllegalStateException("LOCAL_LLM_ERROR: Local command execution failed"))
-                }
-            }
-            else -> { // "gemini"
-                if (effectiveApiKey.isBlank()) {
-                    return Result.failure(IllegalStateException("GEMINI_ERROR: Gemini API key is missing. Add it in Settings."))
-                }
-                val geminiResult = geminiClient.generateContent(effectiveApiKey, prompt)
-                if (geminiResult.isSuccess) {
-                    geminiResult.getOrThrow()
-                } else {
-                    return Result.failure(geminiResult.exceptionOrNull() ?: IllegalStateException("GEMINI_ERROR: Command execution failed"))
-                }
-            }
-        }
-
-        val cleaned = rawOutput
+        val cleaned = result.text
             .replace(Regex("^\"|\"$"), "")
             .replace(Regex("^ai:\\s*", RegexOption.IGNORE_CASE), "")
             .trim()
@@ -191,7 +104,6 @@ class LocalReplyGenerator(
         if (cleaned.isNotBlank()) {
             appSettingsRepository?.decrementCredit()
         }
-
         return Result.success(cleaned)
     }
 
@@ -201,129 +113,188 @@ class LocalReplyGenerator(
         customPersona: String?
     ): Result<ReplyGenerationResult> {
         val settings = appSettingsRepository?.settings?.value
-        val effectiveApiKey = if (!settings?.geminiApiKey.isNullOrBlank()) {
-            settings!!.geminiApiKey
-        } else {
-            com.example.BuildConfig.GEMINI_API_KEY
-        }
-        val aiEngine = settings?.aiEngine ?: "gemini"
+        val businessSnippet = businessContextOf(settings)
 
-        val businessSnippet = if (settings?.isBusinessContextEnabled == true && !settings.businessDescription.isNullOrBlank()) {
-            "Store/Owner: ${settings.businessName}\n${settings.businessDescription}"
-        } else null
-
-        val completionPrompt = promptBuilder.buildCompletionPrompt(
+        val prompt = promptBuilder.buildCompletionPrompt(
             draftText = draftText,
             conversation = conversation,
             customPersona = customPersona,
             businessContext = businessSnippet
         )
 
-        val startTime = System.currentTimeMillis()
-        val rawOutput = when (aiEngine) {
-            "groq" -> {
-                val groqKey = settings?.groqApiKey?.trim() ?: ""
-                if (groqKey.isBlank()) {
-                    return Result.failure(IllegalStateException("GROQ_ERROR: Groq API key is missing. Please add your Groq key in Settings."))
-                }
-                val groqResult = groqClient.generateContent(groqKey, completionPrompt)
-                if (groqResult.isSuccess) {
-                    groqResult.getOrThrow()
-                } else {
-                    return Result.failure(groqResult.exceptionOrNull() ?: IllegalStateException("GROQ_ERROR: Completion failed"))
-                }
-            }
-            "local" -> {
-                val localRes = llmEngine.generate(completionPrompt)
-                if (localRes.isSuccess) {
-                    localRes.getOrThrow()
-                } else {
-                    return Result.failure(localRes.exceptionOrNull() ?: IllegalStateException("LOCAL_LLM_ERROR: Local completion failed"))
-                }
-            }
-            else -> { // "gemini"
-                if (effectiveApiKey.isBlank()) {
-                    return Result.failure(IllegalStateException("GEMINI_ERROR: Gemini API key is missing. Please check your configuration in Settings."))
-                }
-                val geminiResult = geminiClient.generateContent(effectiveApiKey, completionPrompt)
-                if (geminiResult.isSuccess) {
-                    geminiResult.getOrThrow()
-                } else {
-                    return Result.failure(geminiResult.exceptionOrNull() ?: IllegalStateException("GEMINI_ERROR: Completion failed"))
-                }
-            }
-        }
-        val latencyMs = System.currentTimeMillis() - startTime
-
-        val parsedList = parseOutputToSuggestions(rawOutput, conversation.detectedLanguage)
-        if (parsedList.isEmpty()) {
-            return Result.failure(IllegalStateException("INVALID_MODEL_OUTPUT: No completions produced by AI"))
-        }
-
-        appSettingsRepository?.decrementCredit()
-
-        return Result.success(
-            ReplyGenerationResult(
-                suggestions = parsedList,
-                promptUsed = draftText,
-                engineUsed = aiEngine,
-                latencyMs = latencyMs
-            )
+        val raw = generateRaw(
+            prompt = prompt,
+            conversation = conversation,
+            settings = settings,
+            systemPrompt = toneSystemInstruction(settings, customPersona)
         )
+
+        return raw.map { result -> finish(result, draftText) }
     }
 
-    private fun parseOutputToSuggestions(
-        rawOutput: String,
-        language: DetectedLanguage
-    ): List<ReplySuggestion> {
-        var cleanedOutput = rawOutput
-            .replace(Regex("Here are.*?:", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("Sure,.*?:", RegexOption.IGNORE_CASE), "")
-            .trim()
+    // -----------------------------------------------------------------------------------------
+    // Engine routing
+    // -----------------------------------------------------------------------------------------
 
-        val delimiterSplit = cleanedOutput.split("|||")
-            .map { cleanLine(it) }
-            .filter { it.isNotBlank() }
-
-        val lines = if (delimiterSplit.size >= 2) {
-            delimiterSplit
-        } else {
-            cleanedOutput.lines()
-                .map { cleanLine(it) }
-                .filter { it.isNotBlank() && it.length > 2 }
-        }
-
-        if (lines.isEmpty()) {
-            return emptyList()
-        }
-
-        val suggestions = mutableListOf<ReplySuggestion>()
-        val styles = listOf(
-            ReplyStyle.NATURAL_SAFE,
-            ReplyStyle.CASUAL_FRIENDLY,
-            ReplyStyle.PLAYFUL_INTERESTING
+    private suspend fun generateRaw(
+        prompt: String,
+        conversation: ExtractedConversation,
+        settings: AppSettings?,
+        systemPrompt: String
+    ): Result<AiTextResult> {
+        val engine = AppSettings.normalizeEngine(settings?.aiEngine)
+        val profile = TaskProfileAnalyzer.analyze(
+            conversation = conversation,
+            prompt = prompt,
+            requiresFreeTier = true
         )
 
-        for (i in 0 until minOf(3, lines.size)) {
-            val text = lines[i]
-            suggestions.add(
-                ReplySuggestion(
-                    index = i + 1,
-                    style = styles.getOrElse(i) { ReplyStyle.NATURAL_SAFE },
-                    text = text
+        val request = AiTextRequest(
+            systemPrompt = systemPrompt,
+            userPrompt = prompt,
+            maxOutputTokens = profile.desiredOutputTokens,
+            temperature = 0.7
+        )
+
+        Log.d(TAG, "generateReplies | engine=$engine | messages=${conversation.messages.size}")
+
+        return when (engine) {
+            AppSettings.ENGINE_GEMINI -> {
+                // Direct Gemini call. Deliberately NOT routed through Smart AI.
+                val provider = registry?.gemini
+                if (provider == null) {
+                    Result.failure(
+                        AiErrorException(
+                            AiError(
+                                category = AiErrorCategory.MissingApiKey,
+                                safeMessage = "GEMINI_ERROR: Gemini provider unavailable."
+                            )
+                        )
+                    )
+                } else {
+                    provider.generate(request)
+                }
+            }
+
+            AppSettings.ENGINE_LOCAL -> {
+                // Local only: no Gemini, no Groq, no xKiro, no silent cloud fallback.
+                val provider = registry?.local ?: LocalAiProvider(llmEngine, ProviderHealthStore())
+                provider.generate(request)
+            }
+
+            AppSettings.ENGINE_SMART -> {
+                val router = registry?.smartRouter
+                when {
+                    router == null -> Result.failure(
+                        AiErrorException(
+                            AiError(
+                                category = AiErrorCategory.NoEligibleModel,
+                                safeMessage = "SMART_AI_ERROR: Smart AI is unavailable."
+                            )
+                        )
+                    )
+                    // Do not silently fall back to Gemini or Local AI.
+                    !registry.hasAnySmartAiProvider() -> Result.failure(
+                        AiErrorException(
+                            AiError(
+                                category = AiErrorCategory.NoEligibleModel,
+                                safeMessage = "SMART_AI_ERROR: Configure at least one Smart AI provider (Groq or xKiro) in Settings → AI Providers."
+                            )
+                        )
+                    )
+                    else -> router.generate(request, profile)
+                }
+            }
+
+            else -> Result.failure(
+                AiErrorException(
+                    AiError(
+                        category = AiErrorCategory.UnknownError,
+                        safeMessage = "Unknown AI engine: $engine"
+                    )
                 )
             )
         }
-
-        return suggestions
     }
 
-    private fun cleanLine(line: String): String {
-        return line
-            .replace(Regex("^(\\d+[.)\\]]|[-*•])\\s*"), "")
-            .replace(Regex("^\"|\"$"), "")
-            .replace(Regex("^'|'$"), "")
-            .replace(Regex("^`|`$"), "")
-            .trim()
+    // -----------------------------------------------------------------------------------------
+    // Shared prompt plumbing (unchanged behaviour)
+    // -----------------------------------------------------------------------------------------
+
+    private fun buildReplyPrompt(
+        conversation: ExtractedConversation,
+        customPersona: String?,
+        settings: AppSettings?
+    ): String {
+        val maxContext = capabilityManager.maxContextMessages
+        val businessContext = businessContextOf(settings)
+        return promptBuilder.buildPrompt(
+            conversation,
+            maxContext,
+            customPersona,
+            businessContext,
+            settings?.selectedTone ?: "Auto",
+            settings?.promptStrategy ?: "gemini",
+            settings?.customPrompt ?: ""
+        )
+    }
+
+    private fun businessContextOf(settings: AppSettings?): String? =
+        if (settings?.isBusinessContextEnabled == true && !settings.businessDescription.isNullOrBlank()) {
+            "Business/Owner: ${settings.businessName}\nKnowledge & Policies: ${settings.businessDescription}"
+        } else null
+
+    /**
+     * Reinforces the tone rules that already live in the prompt.
+     *
+     * This is additive only: it never rewrites, neutralises or "sanitises" wording, and it
+     * explicitly forbids flattening romantic, flirty, playful or Hinglish conversation into
+     * generic casual English.
+     */
+    private fun toneSystemInstruction(settings: AppSettings?, customPersona: String?): String {
+        val tone = settings?.selectedTone?.takeIf { it.isNotBlank() } ?: "Auto"
+        return buildString {
+            append("You generate chat reply suggestions for a messaging app. ")
+            append("Match the tone, register and language of the conversation exactly. ")
+            append("If the conversation is romantic, flirty, playful, funny, professional, casual, ")
+            append("Hindi or Hinglish, keep that tone - do not neutralise it into generic casual English. ")
+            append("Never add preambles, explanations or numbering. ")
+            if (tone != "Auto") append("Requested style: $tone. ")
+            if (!customPersona.isNullOrBlank()) append("Persona: $customPersona. ")
+            append("Output exactly three suggestions separated by |||.")
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Shared finishing (three-suggestion behaviour)
+    // -----------------------------------------------------------------------------------------
+
+    private fun finish(
+        result: AiTextResult,
+        promptUsed: String
+    ): ReplyGenerationResult {
+        val suggestions = ReplySuggestionParser.parse(result.text)
+        if (suggestions.isEmpty()) {
+            throw AiErrorException(
+                AiError(
+                    category = AiErrorCategory.InvalidRequest,
+                    safeMessage = "INVALID_MODEL_OUTPUT: Provider returned non-parsable or empty suggestions."
+                )
+            )
+        }
+        appSettingsRepository?.decrementCredit()
+        return ReplyGenerationResult(
+            suggestions = suggestions,
+            promptUsed = promptUsed,
+            engineUsed = result.modelId,
+            latencyMs = result.latencyMs
+        )
+    }
+
+    /** Exposed so diagnostics can show the router's last decision. */
+    fun lastRouterProfile(): TaskProfile = TaskProfile.default()
+
+    companion object {
+        private const val TAG = "LocalReplyGenerator"
     }
 }

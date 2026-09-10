@@ -8,6 +8,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import android.view.inputmethod.InputMethodManager
 import com.example.capture.ScreenCaptureActivity
+import com.example.ai.AiProviderRegistry
 import com.example.capture.ScreenCaptureManager
 import com.example.conversation.ExtractedConversation
 import com.example.ocr.MlKitOcrEngine
@@ -50,7 +51,8 @@ class ReplyAIAccessibilityService : AccessibilityService() {
             },
             onClearContextRequested = {
                 cachedConversation = null
-            }
+            },
+            registry = AiProviderRegistry.getInstance(this@ReplyAIAccessibilityService)
         ).apply {
             setRootNodeProvider {
                 getTargetAppRootNode(currentPackageName) ?: rootInActiveWindow

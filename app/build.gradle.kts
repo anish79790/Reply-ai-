@@ -20,9 +20,8 @@ android {
     versionCode = 12
     versionName = "2.8.2-diagnostic-ui"
 
-    val apiKey = System.getenv("GEMINI_API_KEY") ?: ""
-    buildConfigField("String", "GEMINI_API_KEY", "\"$apiKey\"")
-
+    // NOTE: no API key is compiled into this app. Provider keys are supplied by the user in
+    // Settings and stored encrypted via the Android Keystore (see security/ApiKeyRepository).
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
@@ -128,6 +127,7 @@ dependencies {
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
   testImplementation(libs.junit)
+  testImplementation(libs.mockwebserver)
   testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.robolectric)
   testImplementation(libs.roborazzi)
